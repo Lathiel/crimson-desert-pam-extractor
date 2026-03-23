@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.exe
+*.zip
+_test/
+*_out/
+*.fbx
+*.obj
+*.mtl
