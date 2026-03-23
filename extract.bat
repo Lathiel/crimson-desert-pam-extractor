@@ -176,21 +176,12 @@ if exist "!LOD_FILE!" (
 :: -------------------------------------------------------
 echo.
 echo  [3/3] DDS textures...
-set "DDS_COUNT=0"
-for /f "usebackq delims=" %%D in (`powershell -noprofile -executionpolicy bypass -file "%SCRIPT_DIR%pick.ps1" dds "!PAM_STEM!" "!PAM_DIR:~0,-1!"`) do (
-    if !DDS_COUNT!==0 (
-        if not exist "!OUT_DIR!" mkdir "!OUT_DIR!"
-        echo.
-    )
-    copy /y "%%D" "!OUT_DIR!\" >nul 2>&1
-    echo         copied: %%~nxD
-    set /a DDS_COUNT+=1
-)
-if !DDS_COUNT!==0 (
-    echo         none found, skipping
+echo.
+python "!EXTRACTOR!" "!PAM_FILE!" --copy-textures -o "!OUT_DIR!"
+if errorlevel 1 (
+    echo  [3/3] FAILED
 ) else (
-    echo.
-    echo  [3/3] OK  (!DDS_COUNT! file(s) copied)
+    echo  [3/3] OK
 )
 
 :: -------------------------------------------------------
@@ -201,9 +192,7 @@ echo.
 echo  ------------------------------------------
 echo.
 if "!EMODE!"=="--info-only" goto :SKIP_OPEN
-choice /c YN /n /m "  Open output folder? [Y/N]: "
-if errorlevel 2 goto :SKIP_OPEN
-if exist "!OUT_DIR!" ( start "" explorer "!OUT_DIR!" )
+powershell -noprofile -command "Start-Process explorer '!OUT_DIR!'"
 :SKIP_OPEN
 echo.
 pause
@@ -299,15 +288,12 @@ for %%F in ("!BATCH_DIR!\*.pam") do (
     )
 
     set "BDDS=0"
-    for /f "usebackq delims=" %%D in (`powershell -noprofile -executionpolicy bypass -file "%SCRIPT_DIR%pick.ps1" dds "!BSTEM!" "!BSRC:~0,-1!"`) do (
-        if not exist "!BOUT!" mkdir "!BOUT!"
-        copy /y "%%D" "!BOUT!\" >nul 2>&1
-        set /a BDDS+=1
-    )
+    python "!EXTRACTOR!" "%%F" --copy-textures -o "!BOUT!" >nul 2>&1
+    if not errorlevel 1 set "BDDS=1"
     if !BDDS!==0 (
         echo         DDS: none
     ) else (
-        echo         DDS: !BDDS! copied
+        echo         DDS: copied
     )
     echo.
 )
@@ -318,10 +304,7 @@ echo  Batch done: !BATCH_OK! / !DONE! succeeded
 if !FAILED! gtr 0 echo  Failed: !FAILED!
 echo  ------------------------------------------
 echo.
-choice /c YN /n /m "  Open folder? [Y/N]: "
-if errorlevel 2 goto :SKIP_BATCH_OPEN
-start "" explorer "!BATCH_DIR!"
-:SKIP_BATCH_OPEN
+powershell -noprofile -command "Start-Process explorer '!BATCH_DIR!'"
 echo.
 pause
 goto :MAIN

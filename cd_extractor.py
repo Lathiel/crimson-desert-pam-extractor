@@ -147,7 +147,7 @@ class PamParser:
             else:
                 # Global format (prefab PAMs): shared vertex/index buffers with hardcoded offsets
                 if ioff + n_idx > idx_avail:
-                    print(f"  [!] Mesh {i} ({mat}): indices out of PAM bounds — skipping (mesh 4 and 5 are in PAMLOD)")
+                    print(f"  [!] Mesh {i} ({mat}): indices out of PAM bounds -- skipping (mesh 4 and 5 are in PAMLOD)")
                     continue
 
                 indices = [struct.unpack_from('<H', d, PAM_IDX_OFF + (ioff+j)*2)[0] for j in range(n_idx)]
@@ -420,6 +420,7 @@ class PamlodParser:
                 vert_offset += len(unique)
 
             mat = group[0]['material'] or f'lod{lod_i}'
+            all_textures = [e['texture'] for e in group if e['texture']]
             self.lod_meshes.append({
                 'name':     f'lod{lod_i:02d}_{mat}',
                 'role':     f'lod_{lod_i}',
@@ -427,15 +428,17 @@ class PamlodParser:
                 'uvs':      all_uvs,
                 'faces':    all_faces,
                 'texture':  group[0]['texture'],
+                'textures': all_textures,   # all submesh textures in this LOD group
                 'material': mat,
             })
             cur = found_idx_off + total_ni * 2
 
 
 class ObjExporter:
-    def __init__(self, parser, out_dir):
-        self.p   = parser
-        self.out = Path(out_dir)
+    def __init__(self, parser, out_dir, scale=1.0):
+        self.p     = parser
+        self.out   = Path(out_dir)
+        self.scale = scale
         os.makedirs(str(self.out), exist_ok=True)
 
     def export(self, base):
@@ -460,12 +463,13 @@ class ObjExporter:
         lines = [f'# Crimson Desert PAM — {base}', f'# {len(self.p.meshes)} submesh(es)', f'mtllib {mtl_name}', '']
         go = 1   # global vertex offset (1-based)
         gto = 1  # global UV offset (1-based)
+        s = self.scale
         for m in self.p.meshes:
             mat = m['material'] or m['name']
             uvs = m.get('uvs', [])
             lines += [f'o {m["name"]}', f'usemtl {mat}']
             for x, y, z in m['verts']:
-                lines.append(f'v {x:.6f} {y:.6f} {z:.6f}')
+                lines.append(f'v {x*s:.6f} {y*s:.6f} {z*s:.6f}')
             for u, v in uvs:
                 lines.append(f'vt {u:.6f} {1.0 - v:.6f}')
             lines.append('s off')
@@ -499,8 +503,9 @@ class ObjSplitExporter(ObjExporter):
             obj_lines = [f'# {m["name"]} ({m["role"]})', f'mtllib {mtl.name}',
                          f'o {m["name"]}', f'usemtl {mat}', '']
             uvs = m.get('uvs', [])
+            s = self.scale
             for x, y, z in m['verts']:
-                obj_lines.append(f'v {x:.6f} {y:.6f} {z:.6f}')
+                obj_lines.append(f'v {x*s:.6f} {y*s:.6f} {z*s:.6f}')
             for u, v in uvs:
                 obj_lines.append(f'vt {u:.6f} {1.0 - v:.6f}')
             obj_lines.append('s off')
@@ -576,8 +581,11 @@ def _fbx_node(buf, name, props=(), children=None):
 
 def _fbx_smooth_normals(verts, faces):
     """Compute per-vertex smooth normals."""
+    n = len(verts)
     nrm = [[0.0, 0.0, 0.0] for _ in verts]
     for a, b, c in faces:
+        if a >= n or b >= n or c >= n:
+            continue  # skip degenerate face with out-of-range index
         ax, ay, az = verts[a];  bx, by, bz = verts[b];  cx, cy, cz = verts[c]
         ex, ey, ez = bx-ax, by-ay, bz-az
         fx, fy, fz = cx-ax, cy-ay, cz-az
@@ -602,9 +610,10 @@ class FbxExporter:
         0xec, 0xe9, 0x0c, 0xe3, 0x75, 0x8f, 0x29, 0x0b,
     ])
 
-    def __init__(self, parser, out_dir):
+    def __init__(self, parser, out_dir, scale=1.0):
         self.p       = parser
         self.out     = Path(out_dir)
+        self.scale   = scale
         self._id_ctr = 3_000_000_000   # > int32 max → always encoded as int64
         os.makedirs(str(self.out), exist_ok=True)
 
@@ -621,6 +630,11 @@ class FbxExporter:
         buf = io.BytesIO()
         W   = _fbx_node
         now = datetime.now()
+
+        # Skip degenerate submeshes (0 vertices or 0 faces)
+        meshes = [m for m in meshes if m and len(m.get('verts', [])) > 0 and len(m.get('faces', [])) > 0]
+        if not meshes:
+            return  # nothing valid to export
 
         geom_ids  = [self._uid() for _ in meshes]
         model_ids = [self._uid() for _ in meshes]
@@ -699,7 +713,8 @@ class FbxExporter:
                 verts  = m['verts'];     uvs   = m.get('uvs', [])
                 faces  = m['faces']
                 has_uv = len(uvs) == len(verts) and bool(uvs)
-                flat_v = [c for xyz in verts for c in xyz]
+                s = self.scale
+                flat_v = [c * s for xyz in verts for c in xyz]
                 flat_i = [v for a, b, c in faces for v in (a, b, ~c)]
                 norms  = _fbx_smooth_normals(verts, faces)
                 # flat_n: per-vertex (IndexToDirect — index array expands per face-corner)
@@ -824,15 +839,15 @@ class FbxSplitExporter(FbxExporter):
 
 class PamlodFbxExporter(FbxExporter):
     """Export each PAMLOD LOD level as a separate binary FBX file."""
-    def __init__(self, lod_parser, out_dir):
-        super().__init__(None, out_dir)
+    def __init__(self, lod_parser, out_dir, scale=1.0):
+        super().__init__(None, out_dir, scale=scale)
         self.lod = lod_parser
 
     def export(self, base):
         results = []
         for lod_i, mesh in enumerate(self.lod.lod_meshes):
             if mesh is None:
-                print(f"  [!] LOD {lod_i}: geometry parse failed — skipped")
+                print(f"  [!] LOD {lod_i}: geometry parse failed -- skipped")
                 continue
             fbx = self.out / f'{base}_lod{lod_i}.fbx'
             self._write(fbx, [mesh])
@@ -842,15 +857,15 @@ class PamlodFbxExporter(FbxExporter):
 
 class PamlodObjExporter(ObjExporter):
     """Export each PAMLOD LOD level as a separate OBJ file."""
-    def __init__(self, lod_parser, out_dir):
-        super().__init__(None, out_dir)
+    def __init__(self, lod_parser, out_dir, scale=1.0):
+        super().__init__(None, out_dir, scale=scale)
         self.lod = lod_parser
 
     def export(self, base):
         results = []
         for lod_i, mesh in enumerate(self.lod.lod_meshes):
             if mesh is None:
-                print(f"  [!] LOD {lod_i}: geometry parse failed — skipped")
+                print(f"  [!] LOD {lod_i}: geometry parse failed -- skipped")
                 continue
             name = f'{base}_lod{lod_i}'
             obj  = self.out / f'{name}.obj'
@@ -862,10 +877,11 @@ class PamlodObjExporter(ObjExporter):
                 f'map_Kd {mesh["texture"]}' if mesh['texture'] else ''
             ]), encoding='utf-8')
             uvs  = mesh.get('uvs', [])
+            s     = self.scale
             lines = [f'# LOD{lod_i}  {mesh["name"]}', f'mtllib {mtl.name}',
                      f'o {mesh["name"]}', f'usemtl {mat}', '']
             for x, y, z in mesh['verts']:
-                lines.append(f'v {x:.6f} {y:.6f} {z:.6f}')
+                lines.append(f'v {x*s:.6f} {y*s:.6f} {z*s:.6f}')
             for u, v in uvs:
                 lines.append(f'vt {u:.6f} {1.0 - v:.6f}')
             lines.append('s off')
@@ -883,11 +899,11 @@ class PamlodObjExporter(ObjExporter):
 def print_info(pam):
     bb, bx = pam.bbox_min, pam.bbox_max
     print(f"\n{'='*60}")
-    print(f"  PREFAB INFO — {pam.path.name}")
+    print(f"  PREFAB INFO -- {pam.path.name}")
     print(f"{'='*60}")
     print(f"  Type: PREFAB (one file = multiple mesh components)")
-    print(f"  BBox: ({bb[0]:.4f},{bb[1]:.4f},{bb[2]:.4f}) → ({bx[0]:.4f},{bx[1]:.4f},{bx[2]:.4f})")
-    print(f"  Size: {(bx[0]-bb[0])*100:.1f}cm × {(bx[1]-bb[1])*100:.1f}cm × {(bx[2]-bb[2])*100:.1f}cm")
+    print(f"  BBox: ({bb[0]:.4f},{bb[1]:.4f},{bb[2]:.4f}) -> ({bx[0]:.4f},{bx[1]:.4f},{bx[2]:.4f})")
+    print(f"  Size: {(bx[0]-bb[0])*100:.1f}cm x {(bx[1]-bb[1])*100:.1f}cm x {(bx[2]-bb[2])*100:.1f}cm")
     print(f"  Submeshes: {len(pam.meshes)}")
     print()
     tv = tf = 0
@@ -899,6 +915,17 @@ def print_info(pam):
         print(f"       {v} vertices  |  {f} triangles")
         print(f"       Texture: {m['texture'] or '(none)'}")
     print(f"\n  TOTAL: {tv} vertices, {tf} triangles")
+    # Unique textures summary
+    seen_tex = {}
+    for m in pam.meshes:
+        base = m['texture'].replace('.dds','') if m['texture'] else None
+        mat  = m['material'] or ''
+        if base and base not in seen_tex:
+            seen_tex[base] = mat
+    if seen_tex:
+        print(f"\n  Textures referenced in file:")
+        for base, mat in seen_tex.items():
+            print(f"    {base}.dds   (material: {mat})")
     print(f"{'='*60}\n")
 
 
@@ -906,11 +933,11 @@ def print_lod_info(lod):
     bb, bx = lod.bbox_min, lod.bbox_max
     valid  = [m for m in lod.lod_meshes if m is not None]
     print(f"\n{'='*60}")
-    print(f"  LOD INFO — {lod.path.name}")
+    print(f"  LOD INFO -- {lod.path.name}")
     print(f"{'='*60}")
     print(f"  LOD levels : {len(lod.lod_meshes)}")
-    print(f"  BBox: ({bb[0]:.4f},{bb[1]:.4f},{bb[2]:.4f}) → ({bx[0]:.4f},{bx[1]:.4f},{bx[2]:.4f})")
-    print(f"  Size: {(bx[0]-bb[0])*100:.1f}cm × {(bx[1]-bb[1])*100:.1f}cm × {(bx[2]-bb[2])*100:.1f}cm")
+    print(f"  BBox: ({bb[0]:.4f},{bb[1]:.4f},{bb[2]:.4f}) -> ({bx[0]:.4f},{bx[1]:.4f},{bx[2]:.4f})")
+    print(f"  Size: {(bx[0]-bb[0])*100:.1f}cm x {(bx[1]-bb[1])*100:.1f}cm x {(bx[2]-bb[2])*100:.1f}cm")
     print()
     for i, m in enumerate(lod.lod_meshes):
         if m is None:
@@ -923,7 +950,115 @@ def print_lod_info(lod):
         tf = sum(len(m['faces']) for m in valid)
         print(f"\n  Parsed: {len(valid)}/{len(lod.lod_meshes)} LOD levels")
         print(f"  LOD 0 (best): {len(valid[0]['verts'])} vertices, {len(valid[0]['faces'])} triangles")
+        # Unique textures across all LODs (use 'textures' list if available)
+        seen_tex = {}
+        for m in valid:
+            tex_list = m.get('textures') or ([m['texture']] if m['texture'] else [])
+            mat = m['material'] or ''
+            for tex in tex_list:
+                base = tex.replace('.dds', '') if tex else None
+                if base and base not in seen_tex:
+                    seen_tex[base] = mat
+        if seen_tex:
+            print(f"\n  Textures referenced in file:")
+            for base, mat in seen_tex.items():
+                print(f"    {base}.dds   (material: {mat})")
     print(f"{'='*60}\n")
+
+
+def write_textures_txt(meshes, base, out_dir, source_path=None):
+    """Write <base>_textures.txt listing all textures referenced by the exported mesh(es).
+    Checks the source file's folder for known texture variants (_n, _sp, _d, _r, _emissive).
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    txt_path = out_dir / f'{base}_textures.txt'
+    src_dir  = Path(source_path).parent if source_path else None
+
+    # Collect unique textures: base_name -> list of (mesh_name, material_name)
+    seen = {}
+    for m in meshes:
+        if m is None:
+            continue
+        tex_list = m.get('textures') or ([m['texture']] if m.get('texture') else [])
+        mat   = m.get('material') or m.get('name', '')
+        mname = m.get('name', mat)
+        for tex in tex_list:
+            if not tex:
+                continue
+            key = tex.lower().replace('.dds', '')
+            if key not in seen:
+                seen[key] = []
+            seen[key].append((mname, mat))
+
+    lines = [
+        f'Textures referenced by: {base}',
+        f'Generated by: Crimson Desert PAM Extractor v3.2',
+        '=' * 60,
+        '',
+    ]
+
+    if not seen:
+        lines.append('(no textures found)')
+    else:
+        lines.append(f'Unique textures: {len(seen)}')
+        lines.append('')
+        VARIANTS = [('_n', 'Normal    '), ('_sp', 'Specular  '), ('_d', 'Detail    '), ('_r', 'Roughness '), ('_emissive', 'Emissive  ')]
+        for tex_base, users in seen.items():
+            user_str = ', '.join(mname for mname, _ in users[:5])
+            lines.append(f'  [{tex_base}]')
+            lines.append(f'    Used by  : {user_str}')
+            if src_dir:
+                albedo_status = 'FOUND' if (src_dir / (tex_base + '.dds')).exists() else 'not in source folder'
+                lines.append(f'    Albedo   : {tex_base}.dds  [{albedo_status}]')
+                for suf, label in VARIANTS:
+                    candidate = tex_base + suf + '.dds'
+                    status = 'FOUND' if (src_dir / candidate).exists() else 'not in source folder'
+                    lines.append(f'    {label}: {candidate}  [{status}]')
+            else:
+                lines.append(f'    Albedo   : {tex_base}.dds')
+                for suf, label in VARIANTS:
+                    lines.append(f'    {label}: {tex_base}{suf}.dds')
+            lines.append('')
+
+    lines.append('=' * 60)
+    txt_path.write_text('\n'.join(lines), encoding='utf-8')
+    return txt_path
+
+
+def copy_textures(meshes, source_path, out_dir):
+    """Copy all referenced DDS textures (albedo + variants) from the source folder to out_dir."""
+    import shutil
+    src_dir = Path(source_path).parent
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    VARIANTS = ['', '_n', '_sp', '_d', '_r', '_emissive']
+
+    seen = set()
+    for m in meshes:
+        if m is None:
+            continue
+        tex_list = m.get('textures') or ([m['texture']] if m.get('texture') else [])
+        for tex in tex_list:
+            if not tex:
+                continue
+            seen.add(tex.lower().replace('.dds', ''))
+
+    copied, missing = [], []
+    for tex_base in seen:
+        for suf in VARIANTS:
+            fname = tex_base + suf + '.dds'
+            src = src_dir / fname
+            if src.exists():
+                dst = out_dir / fname
+                if not dst.exists() or src.stat().st_mtime > dst.stat().st_mtime:
+                    shutil.copy2(str(src), str(dst))
+                copied.append(fname)
+            elif suf == '':
+                missing.append(fname)
+
+    return copied, missing
 
 
 def main():
@@ -946,6 +1081,9 @@ Examples:
                     help='Output format: obj (default) or fbx')
     ap.add_argument('--split',     action='store_true', help='One file per submesh (PAM only)')
     ap.add_argument('--info-only', action='store_true')
+    ap.add_argument('--open-output', action='store_true', help='Open output folder in Explorer when done')
+    ap.add_argument('--copy-textures', action='store_true', help='Copy referenced DDS textures from source folder to output folder')
+    ap.add_argument('--scale', type=float, default=1.0, help='Multiply all vertex coordinates by this factor (Blender default: 100)')
     args = ap.parse_args()
 
     ext = Path(args.input).suffix.lower()
@@ -967,14 +1105,27 @@ Examples:
 
         base    = Path(args.input).stem
         use_fbx = args.format == 'fbx'
-        exp     = PamlodFbxExporter(lod, args.output) if use_fbx else PamlodObjExporter(lod, args.output)
+        exp     = PamlodFbxExporter(lod, args.output, scale=args.scale) if use_fbx else PamlodObjExporter(lod, args.output, scale=args.scale)
         results = exp.export(base)
         ext_str = 'FBX' if use_fbx else 'OBJ'
-        print(f"Exported {len(results)} {ext_str} file(s) \u2192 {args.output}/")
+        print(f"Exported {len(results)} {ext_str} file(s) -> {args.output}/")
         for f in results:
             fname = f[0].name if isinstance(f, tuple) else (f.name if hasattr(f, 'name') else str(f))
             print(f"  {fname}")
+        txt = write_textures_txt(lod.lod_meshes, base, args.output, args.input)
+        print(f"  {txt.name}")
+        if args.copy_textures:
+            copied, missing = copy_textures(lod.lod_meshes, args.input, args.output)
+            if copied:
+                print(f"  Textures copied: {len(copied)}")
+                for f in copied: print(f"    {f}")
+            if missing:
+                print(f"  Textures NOT FOUND: {len(missing)}")
+                for f in missing: print(f"    {f}")
         print("\nDone!")
+        if args.open_output:
+            import subprocess
+            subprocess.Popen(['explorer', str(Path(args.output).resolve())])
         return
 
     # ── PAM path ─────────────────────────────────────────────────────────────
@@ -991,23 +1142,36 @@ Examples:
     base = Path(args.input).stem
     use_fbx = args.format == 'fbx'
     if args.split:
-        exp     = FbxSplitExporter(pam, args.output) if use_fbx else ObjSplitExporter(pam, args.output)
+        exp     = FbxSplitExporter(pam, args.output, scale=args.scale) if use_fbx else ObjSplitExporter(pam, args.output, scale=args.scale)
         results = exp.export(base)
         ext_str = 'FBX' if use_fbx else 'OBJ'
-        print(f"Exported {len(results)} {ext_str} file(s) \u2192 {args.output}/")
+        print(f"Exported {len(results)} {ext_str} file(s) -> {args.output}/")
         for f in results:
             print(f"  {f.name if hasattr(f, 'name') else f}")
     else:
         if use_fbx:
-            exp = FbxExporter(pam, args.output)
+            exp = FbxExporter(pam, args.output, scale=args.scale)
             fbx = exp.export(base)
             print(f"Exported:\n  {fbx}")
         else:
-            exp      = ObjExporter(pam, args.output)
+            exp      = ObjExporter(pam, args.output, scale=args.scale)
             obj, mtl = exp.export(base)
             print(f"Exported:\n  {obj}\n  {mtl}")
 
+    txt = write_textures_txt(pam.meshes, base, args.output, args.input)
+    print(f"  {txt.name}")
+    if args.copy_textures:
+        copied, missing = copy_textures(pam.meshes, args.input, args.output)
+        if copied:
+            print(f"  Textures copied: {len(copied)}")
+            for f in copied: print(f"    {f}")
+        if missing:
+            print(f"  Textures NOT FOUND: {len(missing)}")
+            for f in missing: print(f"    {f}")
     print("\nDone!")
+    if args.open_output:
+        import subprocess
+        subprocess.Popen(['explorer', str(Path(args.output).resolve())])
 
 
 if __name__ == '__main__':
