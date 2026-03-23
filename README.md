@@ -16,6 +16,9 @@ Double-click `extract.bat` — it will open file picker dialogs and handle every
 2. It auto-discovers matching `.pamlod` LOD files and `.dds` textures in the same folder
 3. Output is saved next to each source file
 
+
+UPDATE: Now with GUI support -> GUI.bat
+
 ### Command line
 ```
 python cd_extractor.py <file.pam> [options]
