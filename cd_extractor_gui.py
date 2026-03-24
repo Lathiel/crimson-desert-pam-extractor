@@ -23,19 +23,10 @@ try:
 except ImportError:
     HAS_DND = False
 
-# When frozen by PyInstaller (--onefile), bundled data files land in
-# sys._MEIPASS; user-writable files (recent.json) go next to the exe.
-if getattr(sys, "frozen", False):
-    _BUNDLE_DIR = Path(sys._MEIPASS)          # bundled read-only data
-    _EXE_DIR    = Path(sys.executable).parent # writable, next to the .exe
-else:
-    _BUNDLE_DIR = Path(__file__).parent
-    _EXE_DIR    = Path(__file__).parent
-
-SCRIPT_DIR   = _EXE_DIR
-EXTRACTOR    = _BUNDLE_DIR / "cd_extractor.py"
+SCRIPT_DIR   = Path(__file__).parent
+EXTRACTOR    = SCRIPT_DIR / "cd_extractor.py"
 PYTHON       = sys.executable
-RECENT_FILE  = _EXE_DIR / "recent.json"
+RECENT_FILE  = SCRIPT_DIR / "recent.json"
 MAX_RECENT   = 10
 
 # -- Colour palette (dark theme) ----------------------------------------------
@@ -714,7 +705,10 @@ class App(TkinterDnD.Tk if HAS_DND else tk.Tk):
             out_path = Path(last_out)
             folder_to_open = out_path if out_path.is_dir() else out_path.parent
             try:
-                os.startfile(str(folder_to_open))
+                subprocess.Popen(
+                    ["powershell", "-noprofile", "-command",
+                     f"Start-Process explorer '{folder_to_open}'"]
+                )
             except Exception:
                 pass
 
